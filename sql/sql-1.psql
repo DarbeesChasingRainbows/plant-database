@@ -1,0 +1,2109 @@
+-- Enable required extensions
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "ltree";
+CREATE EXTENSION IF NOT EXISTS "pg_trgm";
+CREATE EXTENSION IF NOT EXISTS "postgis";
+CREATE EXTENSION IF NOT EXISTS "postgis_topology";
+CREATE EXTENSION IF NOT EXISTS "postgis_raster";
+
+-- First, drop everything in reverse dependency order
+DO $$ 
+DECLARE 
+    r RECORD;
+BEGIN
+    -- Drop views that are not part of PostGIS
+    FOR r IN (
+        SELECT viewname 
+        FROM pg_views 
+        WHERE schemaname = current_schema() 
+        AND viewname NOT LIKE 'pg_%'
+        AND viewname NOT IN (
+            'geography_columns',
+            'geometry_columns',
+            'raster_columns',
+            'raster_overviews'
+        )
+    ) LOOP
+        EXECUTE 'DROP VIEW IF EXISTS ' || quote_ident(r.viewname) || ' CASCADE';
+    END LOOP;
+
+    -- Drop tables in reverse dependency order
+    DROP TABLE IF EXISTS growing_observations CASCADE;
+    DROP TABLE IF EXISTS harvests CASCADE;
+    DROP TABLE IF EXISTS plantings CASCADE;
+    DROP TABLE IF EXISTS planting_plans CASCADE;
+    DROP TABLE IF EXISTS soil_tests CASCADE;
+    DROP TABLE IF EXISTS soil_test_locations CASCADE;
+    DROP TABLE IF EXISTS garden_beds CASCADE;
+    DROP TABLE IF EXISTS plots CASCADE;
+    DROP TABLE IF EXISTS garden_areas CASCADE;
+    DROP TABLE IF EXISTS seed_returns CASCADE;
+    DROP TABLE IF EXISTS seed_distributions CASCADE;
+    DROP TABLE IF EXISTS seed_library_members CASCADE;
+    DROP TABLE IF EXISTS germination_tests CASCADE;
+    DROP TABLE IF EXISTS seed_lots CASCADE;
+    DROP TABLE IF EXISTS seed_accessions CASCADE;
+    DROP TABLE IF EXISTS seed_collections CASCADE;
+    DROP TABLE IF EXISTS seed_libraries CASCADE;
+    DROP TABLE IF EXISTS isolation_distances CASCADE;
+    DROP TABLE IF EXISTS seed_cleaning_methods CASCADE;
+    DROP TABLE IF EXISTS seed_storage_conditions CASCADE;
+    DROP TABLE IF EXISTS csa_distributed_items CASCADE;
+    DROP TABLE IF EXISTS csa_distributions CASCADE;
+    DROP TABLE IF EXISTS csa_plan_items CASCADE;
+    DROP TABLE IF EXISTS csa_distribution_plans CASCADE;
+    DROP TABLE IF EXISTS csa_member_preferences CASCADE;
+    DROP TABLE IF EXISTS csa_payments CASCADE;
+    DROP TABLE IF EXISTS csa_subscriptions CASCADE;
+    DROP TABLE IF EXISTS csa_share_types CASCADE;
+    DROP TABLE IF EXISTS csa_members CASCADE;
+    DROP TABLE IF EXISTS plant_nutrient_content CASCADE;
+    DROP TABLE IF EXISTS nutrient CASCADE;
+    DROP TABLE IF EXISTS plant_actions CASCADE;
+    DROP TABLE IF EXISTS herbal_action CASCADE;
+    DROP TABLE IF EXISTS medicinal_properties CASCADE;
+    DROP TABLE IF EXISTS herbal_terminology CASCADE;
+    DROP TABLE IF EXISTS companion_group_plant CASCADE;
+    DROP TABLE IF EXISTS companion_relationship_types CASCADE;
+    DROP TABLE IF EXISTS companion_groups CASCADE;
+    DROP TABLE IF EXISTS plant_germination_guide CASCADE;
+    DROP TABLE IF EXISTS plant_properties CASCADE;
+    DROP TABLE IF EXISTS plant_part CASCADE;
+    DROP TABLE IF EXISTS plants CASCADE;
+    DROP TABLE IF EXISTS workers CASCADE;
+    DROP TABLE IF EXISTS plant_constituents CASCADE;
+    DROP TABLE IF EXISTS constituent_types CASCADE;
+    DROP TABLE IF EXISTS plant_dosages CASCADE;
+    DROP TABLE IF EXISTS dosage_forms CASCADE;
+    DROP TABLE IF EXISTS dosage_routes CASCADE;
+    DROP TABLE IF EXISTS pharmacological_studies CASCADE;
+    DROP TABLE IF EXISTS pharmacological_actions CASCADE;
+    DROP TABLE IF EXISTS pharmacological_action_types CASCADE;
+    DROP TABLE IF EXISTS study_methods CASCADE;
+    DROP TABLE IF EXISTS study_conditions CASCADE;
+    DROP TABLE IF EXISTS term_links CASCADE;
+    DROP TABLE IF EXISTS dictionary_terms CASCADE;
+    DROP TABLE IF EXISTS plant_contraindications CASCADE;
+    DROP TABLE IF EXISTS contraindication_types CASCADE;
+    DROP TABLE IF EXISTS food_uses CASCADE;
+    DROP TABLE IF EXISTS food_categories CASCADE;
+    DROP TABLE IF EXISTS herbal_uses CASCADE;
+    DROP TABLE IF EXISTS herbal_categories CASCADE;
+    DROP TABLE IF EXISTS toxicity_studies CASCADE;
+    DROP TABLE IF EXISTS side_effects CASCADE;
+    DROP TABLE IF EXISTS side_effect_types CASCADE;
+    DROP TABLE IF EXISTS toxicity_types CASCADE;
+    DROP TABLE IF EXISTS cut_flower_characteristics CASCADE;
+    DROP TABLE IF EXISTS cut_flower_treatments CASCADE;
+    DROP TABLE IF EXISTS vase_life_studies CASCADE;
+    DROP TABLE IF EXISTS flower_market_data CASCADE;
+    DROP TABLE IF EXISTS equipment_maintenance_logs CASCADE;
+    DROP TABLE IF EXISTS equipment CASCADE;
+    DROP TABLE IF EXISTS supplies CASCADE;
+    DROP TABLE IF EXISTS supply_transactions CASCADE;
+    DROP TABLE IF EXISTS preparation_methods CASCADE;
+    DROP TABLE IF EXISTS processed_products CASCADE;
+    DROP TABLE IF EXISTS quality_tests CASCADE;
+    DROP TABLE IF EXISTS tasks CASCADE;
+    DROP TABLE IF EXISTS worker_schedules CASCADE;
+    DROP TABLE IF EXISTS training_materials CASCADE;
+    DROP TABLE IF EXISTS documentation CASCADE;
+    DROP TABLE IF EXISTS tcm_meridians CASCADE;
+    DROP TABLE IF EXISTS tcm_tastes CASCADE;
+    DROP TABLE IF EXISTS tcm_temperatures CASCADE;
+    DROP TABLE IF EXISTS tcm_actions CASCADE;
+    DROP TABLE IF EXISTS tcm_patterns CASCADE;
+    DROP TABLE IF EXISTS plant_tcm_properties CASCADE;
+    DROP TABLE IF EXISTS plant_tcm_actions CASCADE;
+    DROP TABLE IF EXISTS plant_tcm_patterns CASCADE;
+    DROP TABLE IF EXISTS ayurvedic_doshas CASCADE;
+    DROP TABLE IF EXISTS ayurvedic_rasas CASCADE;
+    DROP TABLE IF EXISTS ayurvedic_virya CASCADE;
+    DROP TABLE IF EXISTS ayurvedic_vipaka CASCADE;
+    DROP TABLE IF EXISTS ayurvedic_guna CASCADE;
+    DROP TABLE IF EXISTS ayurvedic_dhatus CASCADE;
+    DROP TABLE IF EXISTS ayurvedic_srotas CASCADE;
+    DROP TABLE IF EXISTS plant_ayurvedic_properties CASCADE;
+    DROP TABLE IF EXISTS plant_ayurvedic_actions CASCADE;
+    DROP TABLE IF EXISTS plant_ayurvedic_indications CASCADE;
+
+    -- Drop functions
+    DROP FUNCTION IF EXISTS update_updated_at_column() CASCADE;
+END $$;
+
+-- Create update timestamp function
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
+-- Core plant table
+CREATE TABLE plants (
+    id SERIAL PRIMARY KEY,
+    common_name VARCHAR(100) NOT NULL,
+    botanical_name VARCHAR(100) NOT NULL,
+    family VARCHAR(100),
+    description TEXT,
+    taxonomy TEXT,
+    is_medicinal BOOLEAN DEFAULT false,
+    is_food_crop BOOLEAN DEFAULT false,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Plant parts (e.g., leaves, roots, flowers)
+CREATE TABLE plant_part (
+    part_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id) ON DELETE CASCADE,
+    part_name VARCHAR(50) NOT NULL,
+    description TEXT,
+    edible BOOLEAN DEFAULT false,
+    harvest_guidelines TEXT,
+    storage_requirements TEXT,
+    processing_notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT unique_plant_part UNIQUE (plant_id, part_name)
+);
+
+-- Plant growing properties
+CREATE TABLE plant_properties (
+    property_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id) ON DELETE CASCADE,
+    zone_range VARCHAR(50),
+    soil_ph_range VARCHAR(50),
+    light_requirements VARCHAR(100),
+    water_requirements VARCHAR(100),
+    days_to_maturity INTEGER,
+    height_mature_cm INTEGER,
+    spread_mature_cm INTEGER,
+    soil_type_preferences TEXT,
+    cultivation_notes TEXT,
+    pest_susceptibility TEXT,
+    disease_susceptibility TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Germination guide
+CREATE TABLE plant_germination_guide (
+    guide_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id) ON DELETE CASCADE,
+    zone_range VARCHAR(50),
+    soil_temp_min_c DECIMAL(4,1),
+    soil_temp_max_c DECIMAL(4,1),
+    days_to_germination_min INTEGER,
+    days_to_germination_max INTEGER,
+    planting_depth_cm DECIMAL(4,1),
+    light_requirement VARCHAR(50), -- 'Light', 'Dark', 'Either'
+    spring_start_week INTEGER, -- Week number for spring planting
+    spring_end_week INTEGER,
+    fall_start_week INTEGER, -- Week number for fall planting
+    fall_end_week INTEGER,
+    indoor_sowing_weeks_before_frost INTEGER,
+    stratification_required BOOLEAN DEFAULT false,
+    stratification_instructions TEXT,
+    scarification_required BOOLEAN DEFAULT false,
+    scarification_instructions TEXT,
+    special_requirements TEXT,
+    germination_notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT unique_plant_zone UNIQUE (plant_id, zone_range)
+);
+
+-- Companion planting groups
+CREATE TABLE companion_groups (
+    group_id SERIAL PRIMARY KEY,
+    group_name VARCHAR(100) NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT unique_group_name UNIQUE (group_name)
+);
+
+-- Companion relationship types
+CREATE TABLE companion_relationship_types (
+    relationship_type_id SERIAL PRIMARY KEY,
+    type_name VARCHAR(50) UNIQUE NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Junction table for companion planting relationships
+CREATE TABLE companion_group_plant (
+    companion_group_plant_id SERIAL PRIMARY KEY,
+    group_id INTEGER REFERENCES companion_groups(group_id) ON DELETE CASCADE,
+    plant_id INTEGER REFERENCES plants(id) ON DELETE CASCADE,
+    relationship_type_id INTEGER REFERENCES companion_relationship_types(relationship_type_id),
+    benefits TEXT,
+    cautions TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(group_id, plant_id, relationship_type_id)
+);
+
+-- Medicinal Properties Structure
+CREATE TABLE herbal_action (
+    action_id SERIAL PRIMARY KEY,
+    action_name VARCHAR(100) UNIQUE NOT NULL,
+    description TEXT,
+    scientific_basis TEXT,
+    historical_context TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE plant_actions (
+    plant_action_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id) ON DELETE CASCADE,
+    action_id INTEGER REFERENCES herbal_action(action_id),
+    part_id INTEGER REFERENCES plant_part(part_id),
+    specific_notes TEXT,
+    strength_rating INTEGER CHECK (strength_rating BETWEEN 1 AND 10),
+    research_references TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(plant_id, action_id, part_id)
+);
+
+CREATE TABLE medicinal_properties (
+    med_prop_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id) ON DELETE CASCADE,
+    drug_interactions TEXT,
+    traditional_uses TEXT,
+    safety_notes TEXT,
+    preparation_methods TEXT,
+    dosage_guidelines TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE herbal_terminology (
+    term_id SERIAL PRIMARY KEY,
+    term VARCHAR(100) UNIQUE NOT NULL,
+    phonetic_pronunciation VARCHAR(100),
+    definition TEXT NOT NULL,
+    etymology TEXT,
+    context_of_use TEXT,
+    related_terms TEXT,
+    language_of_origin VARCHAR(50),
+    usage_examples TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Nutritional Information
+CREATE TABLE nutrient (
+    nutrient_id SERIAL PRIMARY KEY,
+    nutrient_name VARCHAR(100) UNIQUE NOT NULL,
+    category VARCHAR(50),
+    unit_of_measure VARCHAR(20),
+    rda_value VARCHAR(50),
+    description TEXT,
+    health_benefits TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE plant_nutrient_content (
+    content_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id) ON DELETE CASCADE,
+    part_id INTEGER REFERENCES plant_part(part_id),
+    nutrient_id INTEGER REFERENCES nutrient(nutrient_id),
+    amount_per_100g DECIMAL(10,2),
+    analysis_method TEXT,
+    analysis_date DATE,
+    preparation_state VARCHAR(50),
+    notes TEXT,
+    source_reference TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(plant_id, part_id, nutrient_id, preparation_state)
+);
+
+-- Constituent Types table
+CREATE TABLE constituent_types (
+    type_id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Plant Constituents table
+CREATE TABLE plant_constituents (
+    constituent_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id) ON DELETE CASCADE,
+    type_id INTEGER REFERENCES constituent_types(type_id),
+    name VARCHAR(255),
+    percentage DECIMAL(10,4),
+    concentration_range VARCHAR(100),
+    notes TEXT,
+    source_reference TEXT,
+    part_id INTEGER REFERENCES plant_part(part_id),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Dosage Forms table
+CREATE TABLE dosage_forms (
+    form_id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Dosage Routes table
+CREATE TABLE dosage_routes (
+    route_id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Plant Dosages table
+CREATE TABLE plant_dosages (
+    dosage_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id) ON DELETE CASCADE,
+    form_id INTEGER REFERENCES dosage_forms(form_id),
+    route_id INTEGER REFERENCES dosage_routes(route_id),
+    part_id INTEGER REFERENCES plant_part(part_id),
+    min_dosage DECIMAL(10,4),
+    max_dosage DECIMAL(10,4),
+    dosage_unit VARCHAR(50),
+    frequency VARCHAR(100),
+    max_frequency VARCHAR(100),
+    concentration_percentage DECIMAL(10,4),
+    indication TEXT,
+    contraindications TEXT,
+    source_reference TEXT,
+    notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT valid_dosage_range CHECK (min_dosage <= max_dosage)
+);
+
+-- Study Methods table
+CREATE TABLE study_methods (
+    method_id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Study Conditions table (for experimental conditions and models)
+CREATE TABLE study_conditions (
+    condition_id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    category VARCHAR(100), -- e.g., 'cell line', 'animal model', 'tissue type'
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Pharmacological Action Types table
+CREATE TABLE pharmacological_action_types (
+    type_id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    description TEXT,
+    category VARCHAR(100), -- e.g., 'primary', 'secondary', 'mechanism'
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Pharmacological Actions table
+CREATE TABLE pharmacological_actions (
+    action_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id) ON DELETE CASCADE,
+    type_id INTEGER REFERENCES pharmacological_action_types(type_id),
+    summary TEXT,
+    clinical_evidence TEXT,
+    preclinical_evidence TEXT,
+    safety_notes TEXT,
+    mechanism_of_action TEXT,
+    pharmacokinetics TEXT,
+    research_status VARCHAR(50), -- e.g., 'preliminary', 'extensive', 'conclusive'
+    evidence_level VARCHAR(50), -- e.g., 'strong', 'moderate', 'weak'
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Pharmacological Studies table
+CREATE TABLE pharmacological_studies (
+    study_id SERIAL PRIMARY KEY,
+    action_id INTEGER REFERENCES pharmacological_actions(action_id) ON DELETE CASCADE,
+    method_id INTEGER REFERENCES study_methods(method_id),
+    condition_id INTEGER REFERENCES study_conditions(condition_id),
+    constituent_id INTEGER REFERENCES plant_constituents(constituent_id),
+    title TEXT NOT NULL,
+    methodology TEXT,
+    study_design TEXT,
+    control_type VARCHAR(100),
+    sample_size INTEGER,
+    dosage TEXT,
+    duration VARCHAR(100),
+    results TEXT,
+    significance TEXT,
+    statistical_method VARCHAR(255),
+    p_value VARCHAR(50),
+    confidence_interval VARCHAR(100),
+    concentration_amount DECIMAL(10,4),
+    concentration_unit VARCHAR(50),
+    study_model VARCHAR(255),
+    reference_source VARCHAR(50),
+    publication_doi VARCHAR(255),
+    notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Dictionary Terms table
+CREATE TABLE dictionary_terms (
+    term_id SERIAL PRIMARY KEY,
+    term VARCHAR(255) NOT NULL,
+    pronunciation VARCHAR(255),
+    definition TEXT NOT NULL,
+    etymology TEXT,
+    notes TEXT,
+    term_type VARCHAR(50), -- e.g., 'botanical', 'chemical', 'medical'
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT unique_term UNIQUE(term)
+);
+
+-- Term Links table - links terms to various entities
+CREATE TABLE term_links (
+    link_id SERIAL PRIMARY KEY,
+    term_id INTEGER REFERENCES dictionary_terms(term_id) ON DELETE CASCADE,
+    entity_type VARCHAR(50) NOT NULL, -- e.g., 'plant', 'constituent', 'action'
+    entity_id INTEGER NOT NULL,
+    context TEXT, -- Optional context for where/how the term is used
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT unique_term_link UNIQUE(term_id, entity_type, entity_id)
+);
+
+-- Contraindication Types table
+CREATE TABLE contraindication_types (
+    type_id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Plant Contraindications table
+CREATE TABLE plant_contraindications (
+    contraindication_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id) ON DELETE CASCADE,
+    type_id INTEGER REFERENCES contraindication_types(type_id),
+    description TEXT NOT NULL,
+    warning_level VARCHAR(50), -- e.g., 'caution', 'warning', 'severe'
+    affected_populations TEXT[], -- Array of affected populations
+    evidence_level VARCHAR(50), -- e.g., 'strong', 'moderate', 'limited'
+    reference_source TEXT,
+    notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Food Categories table
+CREATE TABLE food_categories (
+    category_id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    description TEXT,
+    regulatory_notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Food Uses table
+CREATE TABLE food_uses (
+    food_use_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id) ON DELETE CASCADE,
+    category_id INTEGER REFERENCES food_categories(category_id),
+    is_food_crop BOOLEAN DEFAULT false,
+    is_flavoring BOOLEAN DEFAULT false,
+    regulatory_status TEXT,
+    preparation_methods TEXT[],
+    nutritional_notes TEXT,
+    safety_limitations TEXT,
+    historical_use TEXT,
+    culinary_uses TEXT,
+    storage_handling TEXT,
+    seasonal_availability TEXT[],
+    reference_source TEXT,
+    notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Herbal Categories table
+CREATE TABLE herbal_categories (
+    category_id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    description TEXT,
+    traditional_system VARCHAR(100), -- e.g., 'Western', 'TCM', 'Ayurveda'
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Herbal Uses table
+CREATE TABLE herbal_uses (
+    herbal_use_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id) ON DELETE CASCADE,
+    category_id INTEGER REFERENCES herbal_categories(category_id),
+    traditional_uses TEXT[],
+    preparation_methods TEXT[],
+    administration_routes TEXT[],
+    historical_context TEXT,
+    effectiveness_notes TEXT,
+    modern_applications TEXT,
+    reference_source TEXT,
+    notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Side Effect Types table
+CREATE TABLE side_effect_types (
+    type_id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    description TEXT,
+    system_affected VARCHAR(100), -- e.g., 'hepatic', 'dermal', 'renal'
+    severity_scale VARCHAR(50), -- e.g., 'mild', 'moderate', 'severe'
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Side Effects table
+CREATE TABLE side_effects (
+    effect_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id) ON DELETE CASCADE,
+    type_id INTEGER REFERENCES side_effect_types(type_id),
+    description TEXT NOT NULL,
+    onset_pattern VARCHAR(100), -- e.g., 'acute', 'chronic', 'variable'
+    severity VARCHAR(50),
+    frequency VARCHAR(50), -- e.g., 'rare', 'common', 'very common'
+    reversibility BOOLEAN,
+    population_affected TEXT,
+    clinical_notes TEXT,
+    reference_source TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Toxicity Types table
+CREATE TABLE toxicity_types (
+    type_id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    description TEXT,
+    measurement_method TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Toxicity Studies table
+CREATE TABLE toxicity_studies (
+    study_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id) ON DELETE CASCADE,
+    type_id INTEGER REFERENCES toxicity_types(type_id),
+    study_type VARCHAR(100), -- e.g., 'acute', 'chronic', 'subchronic'
+    species VARCHAR(100), -- e.g., 'human', 'rat', 'mouse'
+    route_of_exposure VARCHAR(100),
+    duration VARCHAR(100),
+    dosage_amount DECIMAL(10,4),
+    dosage_unit VARCHAR(50),
+    study_design TEXT,
+    outcomes TEXT,
+    ld50_value DECIMAL(10,4),
+    ld50_unit VARCHAR(50),
+    noael_value DECIMAL(10,4), -- No Observed Adverse Effect Level
+    noael_unit VARCHAR(50),
+    histological_findings TEXT,
+    regulatory_outcome TEXT,
+    reference_source TEXT,
+    notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Cut Flower Characteristics table
+CREATE TABLE cut_flower_characteristics (
+    characteristic_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id) ON DELETE CASCADE,
+    stem_length_min DECIMAL(5,2),
+    stem_length_max DECIMAL(5,2),
+    stem_strength VARCHAR(50), -- e.g., 'strong', 'medium', 'weak'
+    flower_form VARCHAR(100), -- e.g., 'single', 'double', 'spray'
+    color_variations TEXT[],
+    fragrance_level VARCHAR(50), -- e.g., 'none', 'light', 'strong'
+    seasonal_availability TEXT[],
+    harvest_stage TEXT,
+    bloom_size DECIMAL(5,2),
+    water_requirements TEXT,
+    preservative_requirements TEXT,
+    post_harvest_requirements TEXT,
+    ethylene_sensitivity BOOLEAN,
+    cold_storage_temp DECIMAL(4,1),
+    transport_requirements TEXT,
+    typical_vase_life_days INTEGER,
+    notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Cut Flower Treatments table
+CREATE TABLE cut_flower_treatments (
+    treatment_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id) ON DELETE CASCADE,
+    treatment_type VARCHAR(100), -- e.g., 'hydration', 'anti-ethylene', 'preservative'
+    treatment_name VARCHAR(255),
+    chemical_composition TEXT,
+    concentration VARCHAR(100),
+    application_method TEXT,
+    duration VARCHAR(100),
+    effectiveness TEXT,
+    precautions TEXT,
+    notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Vase Life Studies table
+CREATE TABLE vase_life_studies (
+    study_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id) ON DELETE CASCADE,
+    study_conditions TEXT,
+    temperature DECIMAL(4,1),
+    relative_humidity INTEGER,
+    light_conditions TEXT,
+    solution_used TEXT,
+    vase_life_days INTEGER,
+    termination_criteria TEXT,
+    quality_parameters TEXT[],
+    findings TEXT,
+    reference_source TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Flower Market Data table
+CREATE TABLE flower_market_data (
+    market_data_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id) ON DELETE CASCADE,
+    market_category VARCHAR(100), -- e.g., 'premium', 'standard', 'filler'
+    typical_price_range_min DECIMAL(10,2),
+    typical_price_range_max DECIMAL(10,2),
+    price_unit VARCHAR(50), -- e.g., 'per stem', 'per bunch'
+    market_season TEXT[],
+    peak_demand_periods TEXT[],
+    market_trends TEXT,
+    commercial_grades TEXT[],
+    packaging_requirements TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE planting_guide (
+  guide_id SERIAL PRIMARY KEY,
+  plant_id INTEGER NOT NULL REFERENCES plants(id) ON DELETE CASCADE,
+  spring_planting_start DATE,
+  spring_planting_end DATE,
+  fall_planting_start DATE,
+  fall_planting_end DATE,
+  indoor_sowing_start DATE,
+  transplant_ready_weeks INTEGER,
+  direct_sow_after_frost BOOLEAN DEFAULT false,
+  frost_tolerance VARCHAR(50),
+  heat_tolerance VARCHAR(50),
+  succession_planting_interval INTEGER,
+  companion_plants TEXT[],
+  incompatible_plants TEXT[],
+  rotation_group VARCHAR(50),
+  rotation_interval INTEGER,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TRIGGER update_planting_guide_modtime
+  BEFORE UPDATE ON planting_guide
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- Add indexes
+CREATE INDEX idx_plant_constituents_plant_id ON plant_constituents(plant_id);
+CREATE INDEX idx_plant_constituents_type_id ON plant_constituents(type_id);
+CREATE INDEX idx_plant_constituents_part_id ON plant_constituents(part_id);
+CREATE INDEX idx_plant_dosages_plant_id ON plant_dosages(plant_id);
+CREATE INDEX idx_plant_dosages_form_id ON plant_dosages(form_id);
+CREATE INDEX idx_plant_dosages_route_id ON plant_dosages(route_id);
+CREATE INDEX idx_plant_dosages_part_id ON plant_dosages(part_id);
+CREATE INDEX idx_pharm_actions_plant_id ON pharmacological_actions(plant_id);
+CREATE INDEX idx_pharm_actions_type_id ON pharmacological_actions(type_id);
+CREATE INDEX idx_pharm_studies_action_id ON pharmacological_studies(action_id);
+CREATE INDEX idx_pharm_studies_method_id ON pharmacological_studies(method_id);
+CREATE INDEX idx_pharm_studies_condition_id ON pharmacological_studies(condition_id);
+CREATE INDEX idx_pharm_studies_constituent_id ON pharmacological_studies(constituent_id);
+CREATE INDEX idx_dictionary_term ON dictionary_terms(term);
+CREATE INDEX idx_dictionary_term_type ON dictionary_terms(term_type);
+CREATE INDEX idx_term_links_term_id ON term_links(term_id);
+CREATE INDEX idx_term_links_entity ON term_links(entity_type, entity_id);
+CREATE INDEX idx_plant_contraindications_plant_id ON plant_contraindications(plant_id);
+CREATE INDEX idx_plant_contraindications_type_id ON plant_contraindications(type_id);
+CREATE INDEX idx_plant_contraindications_warning_level ON plant_contraindications(warning_level);
+CREATE INDEX idx_food_uses_plant_id ON food_uses(plant_id);
+CREATE INDEX idx_food_uses_category_id ON food_uses(category_id);
+CREATE INDEX idx_herbal_uses_plant_id ON herbal_uses(plant_id);
+CREATE INDEX idx_herbal_uses_category_id ON herbal_uses(category_id);
+CREATE INDEX idx_side_effects_plant_id ON side_effects(plant_id);
+CREATE INDEX idx_side_effects_type_id ON side_effects(type_id);
+CREATE INDEX idx_toxicity_studies_plant_id ON toxicity_studies(plant_id);
+CREATE INDEX idx_toxicity_studies_type_id ON toxicity_studies(type_id);
+CREATE INDEX idx_cut_flower_characteristics_plant_id ON cut_flower_characteristics(plant_id);
+CREATE INDEX idx_cut_flower_treatments_plant_id ON cut_flower_treatments(plant_id);
+CREATE INDEX idx_vase_life_studies_plant_id ON vase_life_studies(plant_id);
+CREATE INDEX idx_flower_market_data_plant_id ON flower_market_data(plant_id);
+
+-- Add update triggers for constituent_types
+CREATE TRIGGER update_constituent_types_modtime
+    BEFORE UPDATE ON constituent_types
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Add update triggers for plant_constituents
+CREATE TRIGGER update_plant_constituents_modtime
+    BEFORE UPDATE ON plant_constituents
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Add update triggers for dosage_forms
+CREATE TRIGGER update_dosage_forms_modtime
+    BEFORE UPDATE ON dosage_forms
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Add update triggers for dosage_routes
+CREATE TRIGGER update_dosage_routes_modtime
+    BEFORE UPDATE ON dosage_routes
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Add update triggers for plant_dosages
+CREATE TRIGGER update_plant_dosages_modtime
+    BEFORE UPDATE ON plant_dosages
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Add update triggers for study_methods
+CREATE TRIGGER update_study_methods_modtime
+    BEFORE UPDATE ON study_methods
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Add update triggers for study_conditions
+CREATE TRIGGER update_study_conditions_modtime
+    BEFORE UPDATE ON study_conditions
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Add update triggers for pharmacological_action_types
+CREATE TRIGGER update_pharm_action_types_modtime
+    BEFORE UPDATE ON pharmacological_action_types
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Add update triggers for pharmacological_actions
+CREATE TRIGGER update_pharm_actions_modtime
+    BEFORE UPDATE ON pharmacological_actions
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Add update triggers for pharmacological_studies
+CREATE TRIGGER update_pharm_studies_modtime
+    BEFORE UPDATE ON pharmacological_studies
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Add update triggers for dictionary_terms
+CREATE TRIGGER update_dictionary_terms_modtime
+    BEFORE UPDATE ON dictionary_terms
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Add update triggers for term_links
+CREATE TRIGGER update_term_links_modtime
+    BEFORE UPDATE ON term_links
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Add update triggers for contraindication_types
+CREATE TRIGGER update_contraindication_types_modtime
+    BEFORE UPDATE ON contraindication_types
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Add update triggers for plant_contraindications
+CREATE TRIGGER update_plant_contraindications_modtime
+    BEFORE UPDATE ON plant_contraindications
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Add update triggers for food categories
+CREATE TRIGGER update_food_categories_modtime
+    BEFORE UPDATE ON food_categories
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Add update triggers for food uses
+CREATE TRIGGER update_food_uses_modtime
+    BEFORE UPDATE ON food_uses
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Add update triggers for herbal categories
+CREATE TRIGGER update_herbal_categories_modtime
+    BEFORE UPDATE ON herbal_categories
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Add update triggers for herbal uses
+CREATE TRIGGER update_herbal_uses_modtime
+    BEFORE UPDATE ON herbal_uses
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Add update triggers for side effect types
+CREATE TRIGGER update_side_effect_types_modtime
+    BEFORE UPDATE ON side_effect_types
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Add update triggers for side effects
+CREATE TRIGGER update_side_effects_modtime
+    BEFORE UPDATE ON side_effects
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Add update triggers for toxicity types
+CREATE TRIGGER update_toxicity_types_modtime
+    BEFORE UPDATE ON toxicity_types
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Add update triggers for toxicity studies
+CREATE TRIGGER update_toxicity_studies_modtime
+    BEFORE UPDATE ON toxicity_studies
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Add update triggers for cut flower characteristics
+CREATE TRIGGER update_cut_flower_characteristics_modtime
+    BEFORE UPDATE ON cut_flower_characteristics
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Add update triggers for cut flower treatments
+CREATE TRIGGER update_cut_flower_treatments_modtime
+    BEFORE UPDATE ON cut_flower_treatments
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Add update triggers for vase life studies
+CREATE TRIGGER update_vase_life_studies_modtime
+    BEFORE UPDATE ON vase_life_studies
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Add update triggers for flower market data
+CREATE TRIGGER update_flower_market_data_modtime
+    BEFORE UPDATE ON flower_market_data
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Traditional Chinese Medicine (TCM) Tables
+CREATE TABLE tcm_meridians (
+    meridian_id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    chinese_name VARCHAR(50),
+    description TEXT,
+    organ_system VARCHAR(100),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE tcm_tastes (
+    taste_id SERIAL PRIMARY KEY,
+    name VARCHAR(50) NOT NULL,
+    chinese_name VARCHAR(50),
+    description TEXT,
+    characteristics TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE tcm_temperatures (
+    temperature_id SERIAL PRIMARY KEY,
+    name VARCHAR(50) NOT NULL,
+    chinese_name VARCHAR(50),
+    description TEXT,
+    characteristics TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE tcm_actions (
+    action_id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    chinese_name VARCHAR(50),
+    description TEXT,
+    category VARCHAR(100),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE tcm_patterns (
+    pattern_id SERIAL PRIMARY KEY,
+    name VARCHAR(200) NOT NULL,
+    chinese_name VARCHAR(50),
+    description TEXT,
+    symptoms TEXT[],
+    etiology TEXT,
+    treatment_principles TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE plant_tcm_properties (
+    property_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id) ON DELETE CASCADE,
+    chinese_name VARCHAR(50),
+    pinyin_name VARCHAR(100),
+    temperature_id INTEGER REFERENCES tcm_temperatures(temperature_id),
+    taste_ids INTEGER[] NOT NULL,
+    meridian_ids INTEGER[] NOT NULL,
+    dosage_range VARCHAR(100),
+    contraindications TEXT,
+    preparation_methods TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_plant_tcm_properties_plant FOREIGN KEY (plant_id) REFERENCES plants(id) ON DELETE CASCADE
+);
+
+CREATE TABLE plant_tcm_actions (
+    plant_action_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id) ON DELETE CASCADE,
+    action_id INTEGER REFERENCES tcm_actions(action_id),
+    notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_plant_tcm_actions_plant FOREIGN KEY (plant_id) REFERENCES plants(id) ON DELETE CASCADE,
+    CONSTRAINT fk_plant_tcm_actions_action FOREIGN KEY (action_id) REFERENCES tcm_actions(action_id)
+);
+
+CREATE TABLE plant_tcm_patterns (
+    plant_pattern_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id) ON DELETE CASCADE,
+    pattern_id INTEGER REFERENCES tcm_patterns(pattern_id),
+    usage_notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_plant_tcm_patterns_plant FOREIGN KEY (plant_id) REFERENCES plants(id) ON DELETE CASCADE,
+    CONSTRAINT fk_plant_tcm_patterns_pattern FOREIGN KEY (pattern_id) REFERENCES tcm_patterns(pattern_id)
+);
+
+-- Insert some example data for TCM properties
+INSERT INTO tcm_meridians (name, chinese_name, description, organ_system) VALUES
+('Lung', '肺', 'Governs Qi and respiration', 'Respiratory'),
+('Large Intestine', '大腸', 'Governs elimination', 'Digestive'),
+('Stomach', '胃', 'Governs digestion and ripening/rotting', 'Digestive'),
+('Spleen', '脾', 'Governs transformation and transportation', 'Digestive'),
+('Heart', '心', 'Governs blood and spirit', 'Cardiovascular'),
+('Small Intestine', '小腸', 'Governs separation of pure from impure', 'Digestive'),
+('Bladder', '膀胱', 'Governs water passage and storage', 'Urinary'),
+('Kidney', '腎', 'Governs water metabolism and essence storage', 'Urinary'),
+('Pericardium', '心包', 'Protects the heart', 'Cardiovascular'),
+('Triple Burner', '三焦', 'Governs water passages and metabolism', 'Metabolic'),
+('Gallbladder', '膽', 'Governs decision making and bile storage', 'Digestive'),
+('Liver', '肝', 'Governs free flow of Qi and blood storage', 'Digestive');
+
+INSERT INTO tcm_tastes (name, chinese_name, description) VALUES
+('Pungent', '辛', 'Dispersing and moving quality'),
+('Sweet', '甘', 'Tonifying and harmonizing quality'),
+('Sour', '酸', 'Astringent and gathering quality'),
+('Bitter', '苦', 'Draining and drying quality'),
+('Salty', '鹹', 'Softening and purging quality');
+
+INSERT INTO tcm_temperatures (name, chinese_name, description) VALUES
+('Hot', '熱', 'Strongly warming quality'),
+('Warm', '溫', 'Mildly warming quality'),
+('Neutral', '平', 'Neither warming nor cooling'),
+('Cool', '涼', 'Mildly cooling quality'),
+('Cold', '寒', 'Strongly cooling quality');
+
+-- Ayurvedic Medicine Tables
+CREATE TABLE ayurvedic_doshas (
+    dosha_id SERIAL PRIMARY KEY,
+    name VARCHAR(50) NOT NULL,
+    sanskrit_name VARCHAR(50),
+    description TEXT,
+    elements TEXT[],
+    qualities TEXT[],
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE ayurvedic_rasas (
+    rasa_id SERIAL PRIMARY KEY,
+    name VARCHAR(50) NOT NULL,
+    sanskrit_name VARCHAR(50),
+    description TEXT,
+    effects TEXT,
+    dosha_effects TEXT,
+    elements TEXT[],
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE ayurvedic_virya (
+    virya_id SERIAL PRIMARY KEY,
+    name VARCHAR(50) NOT NULL,
+    sanskrit_name VARCHAR(50),
+    description TEXT,
+    effects TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE ayurvedic_vipaka (
+    vipaka_id SERIAL PRIMARY KEY,
+    name VARCHAR(50) NOT NULL,
+    sanskrit_name VARCHAR(50),
+    description TEXT,
+    effects TEXT,
+    related_taste VARCHAR(50),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE ayurvedic_guna (
+    guna_id SERIAL PRIMARY KEY,
+    name VARCHAR(50) NOT NULL,
+    sanskrit_name VARCHAR(50),
+    description TEXT,
+    opposite_quality VARCHAR(50),
+    dosha_effects TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE ayurvedic_dhatus (
+    dhatu_id SERIAL PRIMARY KEY,
+    name VARCHAR(50) NOT NULL,
+    sanskrit_name VARCHAR(50),
+    description TEXT,
+    formation_time VARCHAR(50),
+    related_dosha VARCHAR(50),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE ayurvedic_srotas (
+    srota_id SERIAL PRIMARY KEY,
+    name VARCHAR(50) NOT NULL,
+    sanskrit_name VARCHAR(50),
+    description TEXT,
+    related_elements TEXT[],
+    related_organs TEXT[],
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE plant_ayurvedic_properties (
+    property_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id) ON DELETE CASCADE,
+    sanskrit_name VARCHAR(100),
+    common_ayurvedic_name VARCHAR(100),
+    rasa_ids INTEGER[] NOT NULL,
+    virya_id INTEGER REFERENCES ayurvedic_virya(virya_id),
+    vipaka_id INTEGER REFERENCES ayurvedic_vipaka(vipaka_id),
+    guna_ids INTEGER[] NOT NULL,
+    dosha_effects JSONB,
+    dhatu_effects JSONB,
+    srota_effects JSONB,
+    prabhava TEXT,
+    dosage_form TEXT,
+    dosage_range VARCHAR(100),
+    anupana TEXT,
+    contraindications TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_plant_ayurvedic_properties_plant FOREIGN KEY (plant_id) REFERENCES plants(id) ON DELETE CASCADE
+);
+
+CREATE TABLE plant_ayurvedic_actions (
+    action_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id) ON DELETE CASCADE,
+    name VARCHAR(100) NOT NULL,
+    sanskrit_name VARCHAR(100),
+    description TEXT,
+    traditional_reference TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE plant_ayurvedic_indications (
+    indication_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id) ON DELETE CASCADE,
+    condition_name VARCHAR(100) NOT NULL,
+    sanskrit_name VARCHAR(100),
+    dosha_involvement TEXT[],
+    treatment_approach TEXT,
+    supporting_formulations TEXT[],
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Insert example data for Ayurvedic concepts
+INSERT INTO ayurvedic_doshas (name, sanskrit_name, description, elements) VALUES
+('Air-Space', 'Vata', 'Governs movement and relates to air and space elements', ARRAY['Air', 'Space']),
+('Fire-Water', 'Pitta', 'Governs transformation and relates to fire and water elements', ARRAY['Fire', 'Water']),
+('Earth-Water', 'Kapha', 'Governs structure and relates to earth and water elements', ARRAY['Earth', 'Water']);
+
+INSERT INTO ayurvedic_rasas (name, sanskrit_name, description, dosha_effects) VALUES
+('Sweet', 'Madhura', 'Builds tissues, calming', 'Decreases Vata and Pitta, Increases Kapha'),
+('Sour', 'Amla', 'Stimulates digestion, energizing', 'Decreases Vata, Increases Pitta and Kapha'),
+('Salty', 'Lavana', 'Improves taste, lubricating', 'Decreases Vata, Increases Pitta and Kapha'),
+('Pungent', 'Katu', 'Stimulates digestion, clearing', 'Decreases Kapha, Increases Vata and Pitta'),
+('Bitter', 'Tikta', 'Detoxifying, reducing', 'Decreases Pitta and Kapha, Increases Vata'),
+('Astringent', 'Kashaya', 'Absorbing, drying', 'Decreases Pitta and Kapha, Increases Vata');
+
+INSERT INTO ayurvedic_virya (name, sanskrit_name, description) VALUES
+('Hot', 'Ushna', 'Heating energy that increases Pitta and decreases Vata and Kapha'),
+('Cold', 'Shita', 'Cooling energy that increases Vata and Kapha and decreases Pitta');
+
+INSERT INTO ayurvedic_vipaka (name, sanskrit_name, description, related_taste) VALUES
+('Sweet', 'Madhura', 'Sweet post-digestive effect', 'Sweet'),
+('Sour', 'Amla', 'Sour post-digestive effect', 'Sour'),
+('Pungent', 'Katu', 'Pungent post-digestive effect', 'Pungent');
+
+-- Base tables with no dependencies
+CREATE TABLE workers (
+    worker_id SERIAL PRIMARY KEY,
+    first_name VARCHAR(50) NOT NULL,
+    last_name VARCHAR(50) NOT NULL,
+    role VARCHAR(50),
+    email VARCHAR(100),
+    phone VARCHAR(20),
+    emergency_contact TEXT,
+    certifications TEXT[],
+    special_skills TEXT,
+    start_date DATE,
+    end_date DATE,
+    status VARCHAR(20),
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Seed Library Management
+CREATE TABLE seed_libraries (
+    library_id SERIAL PRIMARY KEY,
+    library_name VARCHAR(100) UNIQUE NOT NULL,
+    description TEXT,
+    policies TEXT,
+    membership_requirements TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE seed_collections (
+    collection_id SERIAL PRIMARY KEY,
+    library_id INTEGER REFERENCES seed_libraries(library_id),
+    plant_id INTEGER REFERENCES plants(id),
+    collection_name VARCHAR(100),
+    description TEXT,
+    cultural_significance TEXT,
+    preservation_priority VARCHAR(50),
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(library_id, collection_name)
+);
+
+CREATE TABLE seed_accessions (
+    accession_id SERIAL PRIMARY KEY,
+    collection_id INTEGER REFERENCES seed_collections(collection_id),
+    accession_number VARCHAR(50) UNIQUE NOT NULL,
+    acquisition_date DATE,
+    source_type VARCHAR(50), -- saved, donated, purchased, exchanged
+    source_details TEXT,
+    genetic_status VARCHAR(50), -- heirloom, hybrid, open-pollinated
+    special_characteristics TEXT,
+    generation INTEGER,
+    parent_accession_id INTEGER REFERENCES seed_accessions(accession_id),
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE seed_lots (
+    lot_id SERIAL PRIMARY KEY,
+    accession_id INTEGER REFERENCES seed_accessions(accession_id),
+    harvest_date DATE,
+    quantity_grams DECIMAL(10,2),
+    seed_count INTEGER,
+    initial_germination_rate DECIMAL(5,2),
+    storage_location VARCHAR(100),
+    storage_conditions TEXT,
+    notes TEXT,
+    status VARCHAR(20), -- active, depleted, discarded
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE germination_tests (
+    test_id SERIAL PRIMARY KEY,
+    lot_id INTEGER REFERENCES seed_lots(lot_id),
+    test_date DATE NOT NULL,
+    seeds_tested INTEGER NOT NULL,
+    germinated_count INTEGER,
+    germination_rate DECIMAL(5,2),
+    test_duration_days INTEGER,
+    test_conditions TEXT,
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE seed_library_members (
+    member_id SERIAL PRIMARY KEY,
+    first_name VARCHAR(50) NOT NULL,
+    last_name VARCHAR(50) NOT NULL,
+    email VARCHAR(100),
+    phone VARCHAR(20),
+    join_date DATE NOT NULL,
+    membership_type VARCHAR(50),
+    growing_experience TEXT,
+    growing_zone VARCHAR(20),
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(email)
+);
+
+CREATE TABLE seed_distributions (
+    distribution_id SERIAL PRIMARY KEY,
+    lot_id INTEGER REFERENCES seed_lots(lot_id),
+    member_id INTEGER REFERENCES seed_library_members(member_id),
+    distribution_date DATE NOT NULL,
+    quantity_grams DECIMAL(10,2),
+    seed_count INTEGER,
+    intended_use TEXT,
+    growing_zone VARCHAR(20),
+    return_agreement BOOLEAN DEFAULT false,
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE seed_returns (
+    return_id SERIAL PRIMARY KEY,
+    distribution_id INTEGER REFERENCES seed_distributions(distribution_id),
+    return_date DATE NOT NULL,
+    quantity_grams DECIMAL(10,2),
+    seed_count INTEGER,
+    growing_conditions TEXT,
+    selection_methods TEXT,
+    weather_conditions TEXT,
+    pest_disease_notes TEXT,
+    success_rating INTEGER CHECK (success_rating BETWEEN 1 AND 5),
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE isolation_distances (
+    isolation_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id),
+    required_distance_meters INTEGER,
+    isolation_method TEXT,
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE seed_cleaning_methods (
+    method_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id),
+    cleaning_method TEXT,
+    equipment_needed TEXT,
+    instructions TEXT,
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE seed_storage_conditions (
+    condition_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id),
+    optimal_temperature DECIMAL(5,2),
+    optimal_humidity DECIMAL(5,2),
+    storage_container TEXT,
+    expected_viability_years INTEGER,
+    special_requirements TEXT,
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+-- CSA Management Tables
+CREATE TABLE csa_members (
+    member_id SERIAL PRIMARY KEY,
+    first_name VARCHAR(50) NOT NULL,
+    last_name VARCHAR(50) NOT NULL,
+    email VARCHAR(100) NOT NULL,
+    phone VARCHAR(20),
+    address TEXT,
+    join_date DATE NOT NULL,
+    status VARCHAR(20) DEFAULT 'active',
+    payment_preference VARCHAR(50),
+    communication_preference VARCHAR(50),
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT unique_email UNIQUE (email)
+);
+
+CREATE TABLE csa_share_types (
+    share_type_id SERIAL PRIMARY KEY,
+    name VARCHAR(50) NOT NULL,
+    description TEXT,
+    base_price DECIMAL(10,2) NOT NULL,
+    frequency VARCHAR(20), -- weekly, biweekly, monthly
+    size VARCHAR(20), -- small, regular, large
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE csa_subscriptions (
+    subscription_id SERIAL PRIMARY KEY,
+    member_id INTEGER REFERENCES csa_members(member_id),
+    share_type_id INTEGER REFERENCES csa_share_types(share_type_id),
+    start_date DATE NOT NULL,
+    end_date DATE,
+    status VARCHAR(20) DEFAULT 'active',
+    pickup_location VARCHAR(100),
+    pickup_day VARCHAR(20),
+    special_instructions TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE csa_member_preferences (
+    preference_id SERIAL PRIMARY KEY,
+    member_id INTEGER REFERENCES csa_members(member_id),
+    plant_id INTEGER REFERENCES plants(id),
+    preference_type VARCHAR(20), -- 'like', 'dislike', 'allergy', 'avoid'
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE csa_distribution_plans (
+    plan_id SERIAL PRIMARY KEY,
+    distribution_date DATE NOT NULL,
+    share_type_id INTEGER REFERENCES csa_share_types(share_type_id),
+    status VARCHAR(20) DEFAULT 'planned',
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE csa_plan_items (
+    plan_item_id SERIAL PRIMARY KEY,
+    plan_id INTEGER REFERENCES csa_distribution_plans(plan_id),
+    plant_id INTEGER REFERENCES plants(id),
+    quantity_per_share DECIMAL(10,2),
+    unit VARCHAR(20),
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE csa_distributions (
+    distribution_id SERIAL PRIMARY KEY,
+    plan_id INTEGER REFERENCES csa_distribution_plans(plan_id),
+    subscription_id INTEGER REFERENCES csa_subscriptions(subscription_id),
+    distribution_date DATE NOT NULL,
+    status VARCHAR(20) DEFAULT 'pending', -- pending, completed, missed
+    pickup_time TIMESTAMPTZ,
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE csa_distributed_items (
+    distributed_item_id SERIAL PRIMARY KEY,
+    distribution_id INTEGER REFERENCES csa_distributions(distribution_id),
+    plant_id INTEGER REFERENCES plants(id),
+    quantity DECIMAL(10,2),
+    unit VARCHAR(20),
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE csa_payments (
+    payment_id SERIAL PRIMARY KEY,
+    subscription_id INTEGER REFERENCES csa_subscriptions(subscription_id),
+    amount DECIMAL(10,2) NOT NULL,
+    payment_date DATE NOT NULL,
+    payment_method VARCHAR(50),
+    reference_number VARCHAR(100),
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Now for the Plot Management tables with PostGIS integration
+CREATE TABLE garden_areas (
+    area_id SERIAL PRIMARY KEY,
+    area_name VARCHAR(100) NOT NULL,
+    description TEXT,
+    total_size_sqm DECIMAL(10,2),
+    boundary geometry(POLYGON, 4326),
+    elevation_meters DECIMAL(10,2),
+    location_details TEXT,
+    topography TEXT,
+    microclimate_notes TEXT,
+    water_access TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE plots (
+    plot_id SERIAL PRIMARY KEY,
+    area_id INTEGER REFERENCES garden_areas(area_id),
+    plot_code VARCHAR(20) UNIQUE NOT NULL,
+    size_sqm DECIMAL(10,2),
+    boundary geometry(POLYGON, 4326),
+    centroid geometry(POINT, 4326),
+    orientation VARCHAR(50),
+    sun_exposure TEXT,
+    irrigation_type TEXT,
+    notes TEXT,
+    status VARCHAR(20) DEFAULT 'active',
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Garden beds table with PostGIS integration
+CREATE TABLE garden_beds (
+    bed_id SERIAL PRIMARY KEY,
+    plot_id INTEGER REFERENCES plots(plot_id) ON DELETE CASCADE,
+    bed_name VARCHAR(100) NOT NULL,
+    bed_code VARCHAR(20) NOT NULL UNIQUE,
+    length_cm INTEGER,
+    width_cm INTEGER,
+    height_cm INTEGER,
+    area_sqm DECIMAL(10,2),
+    boundary geometry(POLYGON, 4326),
+    centroid geometry(POINT, 4326),
+    soil_type VARCHAR(100),
+    soil_depth_cm DECIMAL(5,2),
+    raised_bed BOOLEAN DEFAULT FALSE,
+    irrigation_type VARCHAR(100),
+    sun_exposure VARCHAR(50),
+    notes TEXT,
+    status VARCHAR(20) DEFAULT 'active',
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE soil_test_locations (
+    location_id SERIAL PRIMARY KEY,
+    plot_id INTEGER REFERENCES plots(plot_id),
+    sample_point geometry(POINT, 4326),
+    description TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE soil_tests (
+    test_id SERIAL PRIMARY KEY,
+    location_id INTEGER REFERENCES soil_test_locations(location_id),
+    test_date DATE NOT NULL,
+    ph_level DECIMAL(4,2),
+    organic_matter_pct DECIMAL(5,2),
+    nitrogen_ppm DECIMAL(10,2),
+    phosphorus_ppm DECIMAL(10,2),
+    potassium_ppm DECIMAL(10,2),
+    calcium_ppm DECIMAL(10,2),
+    magnesium_ppm DECIMAL(10,2),
+    sulfur_ppm DECIMAL(10,2),
+    zinc_ppm DECIMAL(10,2),
+    iron_ppm DECIMAL(10,2),
+    manganese_ppm DECIMAL(10,2),
+    copper_ppm DECIMAL(10,2),
+    boron_ppm DECIMAL(10,2),
+    cec_meq DECIMAL(5,2),
+    soil_texture TEXT,
+    notes TEXT,
+    lab_name VARCHAR(100),
+    lab_report_reference TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE planting_plans (
+    plan_id SERIAL PRIMARY KEY,
+    plot_id INTEGER REFERENCES plots(plot_id),
+    season VARCHAR(20),
+    year INTEGER,
+    layout geometry(MULTIPOLYGON, 4326),
+    notes TEXT,
+    status VARCHAR(20) DEFAULT 'planned',
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE plantings (
+    planting_id SERIAL PRIMARY KEY,
+    plan_id INTEGER REFERENCES planting_plans(plan_id),
+    plot_id INTEGER REFERENCES plots(plot_id),
+    plant_id INTEGER REFERENCES plants(id),
+    seed_lot_id INTEGER REFERENCES seed_lots(lot_id),
+    planting_date DATE NOT NULL,
+    planting_method VARCHAR(50),
+    spacing_cm INTEGER,
+    depth_cm DECIMAL(5,2),
+    quantity_planted INTEGER,
+    area_sqm DECIMAL(10,2),
+    planting_area geometry(POLYGON, 4326),
+    row_lines geometry(MULTILINESTRING, 4326),
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE growing_observations (
+    observation_id SERIAL PRIMARY KEY,
+    planting_id INTEGER REFERENCES plantings(planting_id),
+    observation_date DATE NOT NULL,
+    observation_points geometry(MULTIPOINT, 4326),
+    growth_stage VARCHAR(50),
+    plant_health VARCHAR(50),
+    height_cm DECIMAL(10,2),
+    spread_cm DECIMAL(10,2),
+    flower_status VARCHAR(50),
+    fruit_status VARCHAR(50),
+    pest_issues TEXT,
+    disease_issues TEXT,
+    environmental_stress TEXT,
+    photos TEXT[],
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Harvest Records
+CREATE TABLE harvests (
+    harvest_id SERIAL PRIMARY KEY,
+    planting_id INTEGER REFERENCES plantings(planting_id),
+    harvest_date DATE NOT NULL,
+    quantity_kg DECIMAL(10,2),
+    quantity_units INTEGER,
+    quality_rating INTEGER CHECK (quality_rating BETWEEN 1 AND 5),
+    loss_kg DECIMAL(10,2),
+    loss_reason TEXT,
+    weather_conditions TEXT,
+    harvested_by INTEGER REFERENCES workers(worker_id),
+    processing_notes TEXT,
+    storage_location TEXT,
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Equipment and Resource Management
+CREATE TABLE equipment (
+    equipment_id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    category VARCHAR(50),
+    model_number VARCHAR(100),
+    manufacturer VARCHAR(100),
+    purchase_date DATE,
+    purchase_price DECIMAL(10,2),
+    warranty_expiration DATE,
+    maintenance_schedule TEXT,
+    last_maintenance_date DATE,
+    next_maintenance_date DATE,
+    status VARCHAR(50),
+    storage_location VARCHAR(100),
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE equipment_maintenance_logs (
+    log_id SERIAL PRIMARY KEY,
+    equipment_id INTEGER REFERENCES equipment(equipment_id),
+    maintenance_date DATE NOT NULL,
+    maintenance_type VARCHAR(50),
+    performed_by VARCHAR(100),
+    cost DECIMAL(10,2),
+    parts_replaced TEXT,
+    notes TEXT,
+    next_maintenance_date DATE,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE supplies (
+    supply_id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    category VARCHAR(50),
+    description TEXT,
+    quantity DECIMAL(10,2),
+    unit VARCHAR(20),
+    reorder_point DECIMAL(10,2),
+    preferred_supplier TEXT,
+    location VARCHAR(100),
+    cost_per_unit DECIMAL(10,2),
+    last_ordered_date DATE,
+    last_received_date DATE,
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE supply_transactions (
+    transaction_id SERIAL PRIMARY KEY,
+    supply_id INTEGER REFERENCES supplies(supply_id),
+    transaction_type VARCHAR(20), -- received, used, disposed, transferred
+    quantity DECIMAL(10,2),
+    transaction_date DATE,
+    performed_by VARCHAR(100),
+    reference_number VARCHAR(100),
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Preparation Methods and Processing
+CREATE TABLE preparation_methods (
+    method_id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    description TEXT,
+    equipment_needed TEXT,
+    safety_precautions TEXT,
+    standard_procedure TEXT,
+    quality_control_steps TEXT,
+    estimated_time_minutes INTEGER,
+    difficulty_level VARCHAR(20),
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE processed_products (
+    product_id SERIAL PRIMARY KEY,
+    plant_id INTEGER REFERENCES plants(id),
+    method_id INTEGER REFERENCES preparation_methods(method_id),
+    name VARCHAR(100) NOT NULL,
+    batch_number VARCHAR(50) UNIQUE,
+    production_date DATE,
+    expiration_date DATE,
+    quantity DECIMAL(10,2),
+    unit VARCHAR(20),
+    ingredients TEXT,
+    processing_notes TEXT,
+    storage_conditions TEXT,
+    quality_grade VARCHAR(20),
+    cost_of_production DECIMAL(10,2),
+    retail_price DECIMAL(10,2),
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE quality_tests (
+    test_id SERIAL PRIMARY KEY,
+    product_id INTEGER REFERENCES processed_products(product_id),
+    test_date DATE,
+    test_type VARCHAR(50),
+    testing_method TEXT,
+    specifications TEXT,
+    results TEXT,
+    approved BOOLEAN,
+    approved_by VARCHAR(100),
+    approval_date DATE,
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Labor and Task Management
+
+CREATE TABLE tasks (
+    task_id SERIAL PRIMARY KEY,
+    worker_id INTEGER REFERENCES workers(worker_id),
+    task_type VARCHAR(50),
+    priority VARCHAR(20),
+    description TEXT,
+    assigned_date DATE,
+    due_date DATE,
+    completion_date DATE,
+    estimated_hours DECIMAL(4,2),
+    actual_hours DECIMAL(4,2),
+    status VARCHAR(20),
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE worker_schedules (
+    schedule_id SERIAL PRIMARY KEY,
+    worker_id INTEGER REFERENCES workers(worker_id),
+    date DATE,
+    start_time TIME,
+    end_time TIME,
+    break_duration_minutes INTEGER,
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Education and Documentation
+CREATE TABLE training_materials (
+    material_id SERIAL PRIMARY KEY,
+    title VARCHAR(200) NOT NULL,
+    content_type VARCHAR(50),
+    target_audience VARCHAR(50),
+    difficulty_level VARCHAR(20),
+    prerequisites TEXT,
+    learning_objectives TEXT[],
+    content TEXT,
+    resources TEXT,
+    created_by VARCHAR(100),
+    last_reviewed_date DATE,
+    version VARCHAR(20),
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE documentation (
+    doc_id SERIAL PRIMARY KEY,
+    title VARCHAR(200) NOT NULL,
+    category VARCHAR(50),
+    tags TEXT[],
+    content TEXT,
+    related_processes TEXT[],
+    attachments TEXT[],
+    author VARCHAR(100),
+    review_frequency VARCHAR(50),
+    last_reviewed_date DATE,
+    next_review_date DATE,
+    version VARCHAR(20),
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create indexes
+CREATE INDEX idx_equipment_name ON equipment(name);
+CREATE INDEX idx_equipment_category ON equipment(category);
+CREATE INDEX idx_supply_name ON supplies(name);
+CREATE INDEX idx_supply_category ON supplies(category);
+CREATE INDEX idx_processed_products_batch ON processed_products(batch_number);
+CREATE INDEX idx_worker_name ON workers(last_name, first_name);
+CREATE INDEX idx_task_status ON tasks(status);
+CREATE INDEX idx_task_due_date ON tasks(due_date);
+CREATE INDEX idx_doc_title ON documentation USING gin (title gin_trgm_ops);
+CREATE INDEX idx_training_title ON training_materials USING gin (title gin_trgm_ops);
+
+-- Create triggers for updated_at timestamps
+CREATE TRIGGER update_equipment_modtime
+    BEFORE UPDATE ON equipment
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_supplies_modtime
+    BEFORE UPDATE ON supplies
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_preparation_methods_modtime
+    BEFORE UPDATE ON preparation_methods
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_processed_products_modtime
+    BEFORE UPDATE ON processed_products
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_workers_modtime
+    BEFORE UPDATE ON workers
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_tasks_modtime
+    BEFORE UPDATE ON tasks
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_documentation_modtime
+    BEFORE UPDATE ON documentation
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_training_materials_modtime
+    BEFORE UPDATE ON training_materials
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- Create indexes
+CREATE INDEX idx_harvest_date ON harvests(harvest_date);
+CREATE INDEX idx_harvest_planting ON harvests(planting_id);
+
+-- Create trigger for updated_at
+CREATE TRIGGER update_harvest_modtime
+    BEFORE UPDATE ON harvests
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- Create spatial indexes
+CREATE INDEX idx_garden_areas_boundary ON garden_areas USING GIST (boundary);
+CREATE INDEX idx_plots_boundary ON plots USING GIST (boundary);
+CREATE INDEX idx_plots_centroid ON plots USING GIST (centroid);
+CREATE INDEX idx_soil_test_location ON soil_test_locations USING GIST (sample_point);
+CREATE INDEX idx_planting_area ON plantings USING GIST (planting_area);
+CREATE INDEX idx_planting_rows ON plantings USING GIST (row_lines);
+CREATE INDEX idx_observation_points ON growing_observations USING GIST (observation_points);
+
+-- Create regular indexes
+CREATE INDEX idx_plot_code ON plots(plot_code);
+CREATE INDEX idx_planting_date ON plantings(planting_date);
+CREATE INDEX idx_growing_observation_date ON growing_observations(observation_date);
+
+-- Create triggers
+CREATE TRIGGER update_garden_area_modtime
+    BEFORE UPDATE ON garden_areas
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_plot_modtime
+    BEFORE UPDATE ON plots
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_planting_plan_modtime
+    BEFORE UPDATE ON planting_plans
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_planting_modtime
+    BEFORE UPDATE ON plantings
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- Garden beds indexes
+CREATE INDEX idx_garden_beds_plot_id ON garden_beds(plot_id);
+CREATE INDEX idx_garden_beds_status ON garden_beds(status);
+CREATE INDEX idx_garden_beds_boundary ON garden_beds USING GIST(boundary);
+CREATE INDEX idx_garden_beds_centroid ON garden_beds USING GIST(centroid);
+
+-- Add update triggers for garden_beds
+CREATE TRIGGER update_garden_beds_modtime
+    BEFORE UPDATE ON garden_beds
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- 1. CSA Distribution and Payment Summaries
+CREATE VIEW csa_active_subscriptions AS
+SELECT 
+    m.member_id,
+    m.first_name,
+    m.last_name,
+    m.email,
+    st.name as share_type,
+    s.pickup_location,
+    s.pickup_day,
+    s.start_date,
+    s.end_date,
+    s.status
+FROM csa_subscriptions s
+JOIN csa_members m ON s.member_id = m.member_id
+JOIN csa_share_types st ON s.share_type_id = st.share_type_id
+WHERE s.status = 'active'
+AND (s.end_date IS NULL OR s.end_date >= CURRENT_DATE);
+
+CREATE VIEW csa_distribution_summary AS
+SELECT 
+    dp.distribution_date,
+    st.name as share_type,
+    COUNT(d.distribution_id) as total_distributions,
+    COUNT(CASE WHEN d.status = 'completed' THEN 1 END) as picked_up,
+    COUNT(CASE WHEN d.status = 'missed' THEN 1 END) as missed,
+    COUNT(CASE WHEN d.status = 'pending' THEN 1 END) as pending
+FROM csa_distribution_plans dp
+JOIN csa_share_types st ON dp.share_type_id = st.share_type_id
+LEFT JOIN csa_distributions d ON dp.plan_id = d.plan_id
+GROUP BY dp.distribution_date, st.name
+ORDER BY dp.distribution_date DESC;
+
+CREATE VIEW csa_payment_summary AS
+SELECT 
+    m.member_id,
+    m.first_name || ' ' || m.last_name as member_name,
+    st.name as share_type,
+    s.start_date,
+    s.end_date,
+    st.base_price as expected_payment,
+    COALESCE(SUM(p.amount), 0) as total_paid,
+    st.base_price - COALESCE(SUM(p.amount), 0) as balance_due
+FROM csa_subscriptions s
+JOIN csa_members m ON s.member_id = m.member_id
+JOIN csa_share_types st ON s.share_type_id = st.share_type_id
+LEFT JOIN csa_payments p ON s.subscription_id = p.subscription_id
+WHERE s.status = 'active'
+GROUP BY m.member_id, m.first_name, m.last_name, st.name, s.start_date, s.end_date, st.base_price;
+
+-- 2. Plot Utilization and Crop Rotation Views
+CREATE VIEW plot_utilization AS
+SELECT 
+    p.plot_id,
+    p.plot_code,
+    ga.area_name,
+    p.size_sqm as total_area,
+    COALESCE(SUM(pl.area_sqm), 0) as planted_area,
+    p.size_sqm - COALESCE(SUM(pl.area_sqm), 0) as available_area,
+    COUNT(DISTINCT pl.plant_id) as crop_count,
+    array_agg(DISTINCT plt.common_name) as current_crops
+FROM plots p
+JOIN garden_areas ga ON p.area_id = ga.area_id
+LEFT JOIN plantings pl ON p.plot_id = pl.plot_id
+LEFT JOIN plants plt ON pl.plant_id = plt.id
+WHERE p.status = 'active'
+GROUP BY p.plot_id, p.plot_code, ga.area_name, p.size_sqm;
+
+CREATE VIEW crop_rotation_history AS
+SELECT 
+    p.plot_id,
+    p.plot_code,
+    pl.planting_date,
+    plt.family as plant_family,
+    plt.common_name,
+    pl.planting_method,
+    h.harvest_date as last_harvest_date,
+    COALESCE(h.quantity_kg, 0) as yield_kg
+FROM plots p
+JOIN plantings pl ON p.plot_id = pl.plot_id
+JOIN plants plt ON pl.plant_id = plt.id
+LEFT JOIN harvests h ON pl.planting_id = h.planting_id
+ORDER BY p.plot_code, pl.planting_date DESC;
+
+-- 3. Spatial Analysis Functions
+CREATE OR REPLACE FUNCTION calculate_plot_metrics(p_plot_id INTEGER)
+RETURNS TABLE (
+    plot_code VARCHAR(20),
+    total_area_sqm DECIMAL(10,2),
+    perimeter_m DECIMAL(10,2),
+    center_point geometry,
+    elevation_m DECIMAL(10,2)
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        p.plot_code,
+        ST_Area(p.boundary::geography)::DECIMAL(10,2) as total_area_sqm,
+        ST_Perimeter(p.boundary::geography)::DECIMAL(10,2) as perimeter_m,
+        p.centroid as center_point,
+        ga.elevation_meters
+    FROM plots p
+    JOIN garden_areas ga ON p.area_id = ga.area_id
+    WHERE p.plot_id = p_plot_id;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION find_companion_planting_conflicts(
+    p_plot_id INTEGER,
+    p_new_plant_id INTEGER
+)
+RETURNS TABLE (
+    existing_plant_name VARCHAR(100),
+    conflict_type VARCHAR(50),
+    min_distance_required INTEGER
+) AS $$
+BEGIN
+    RETURN QUERY
+    WITH existing_plantings AS (
+        SELECT DISTINCT plt.common_name, plt.id
+        FROM plantings p
+        JOIN plants plt ON p.plant_id = plt.id
+        WHERE p.plot_id = p_plot_id
+        AND p.planting_date <= CURRENT_DATE
+        AND (SELECT COUNT(*) FROM harvests h WHERE h.planting_id = p.planting_id) = 0
+    )
+    SELECT 
+        ep.common_name,
+        crt.type_name as conflict_type,
+        COALESCE(id.required_distance_meters, 0) as min_distance_required
+    FROM existing_plantings ep
+    JOIN companion_group_plant cgp ON ep.id = cgp.plant_id
+    JOIN companion_relationship_type crt ON cgp.relationship_type_id = crt.id
+    LEFT JOIN isolation_distances id ON ep.id = id.plant_id
+    WHERE crt.type_name = 'Antagonistic'
+    AND cgp.plant_id = p_new_plant_id;
+END;
+$$ LANGUAGE plpgsql;
+
+-- 4. Harvest Tracking and Analysis Views
+CREATE VIEW harvest_summary AS
+SELECT 
+    p.common_name,
+    p.botanical_name,
+    p.family,
+    SUM(h.quantity_kg) as total_yield_kg,
+    COUNT(DISTINCT pl.planting_id) as planting_count,
+    MIN(h.harvest_date) as first_harvest,
+    MAX(h.harvest_date) as last_harvest,
+    ROUND(AVG(h.quality_rating), 2) as avg_quality_rating,
+    SUM(h.loss_kg) as total_loss_kg,
+    ROUND(SUM(h.loss_kg) / NULLIF(SUM(h.quantity_kg + h.loss_kg), 0) * 100, 2) as loss_percentage
+FROM plants p
+JOIN plantings pl ON p.id = pl.plant_id
+JOIN harvests h ON pl.planting_id = h.planting_id
+GROUP BY p.id, p.common_name, p.botanical_name, p.family;
+
+CREATE VIEW yield_by_plot AS
+SELECT 
+    ga.area_name,
+    p.plot_code,
+    plt.common_name as crop,
+    pl.planting_date,
+    SUM(h.quantity_kg) as total_yield_kg,
+    CASE 
+        WHEN pl.area_sqm > 0 THEN ROUND((SUM(h.quantity_kg) / pl.area_sqm)::numeric, 2)
+        ELSE 0
+    END as yield_per_sqm,
+    ROUND(AVG(h.quality_rating), 2) as avg_quality
+FROM garden_areas ga
+JOIN plots p ON ga.area_id = p.area_id
+JOIN plantings pl ON p.plot_id = pl.plot_id
+JOIN plants plt ON pl.plant_id = plt.id
+JOIN harvests h ON pl.planting_id = h.planting_id
+GROUP BY ga.area_name, p.plot_code, plt.common_name, pl.planting_date, pl.area_sqm;
+
+CREATE OR REPLACE FUNCTION get_harvest_projections(
+    start_date DATE,
+    end_date DATE
+)
+RETURNS TABLE (
+    crop_name VARCHAR(100),
+    projected_harvest_date DATE,
+    estimated_yield_kg DECIMAL(10,2),
+    plot_code VARCHAR(20),
+    current_status TEXT
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        p.common_name,
+        (pl.planting_date + (pp.days_to_maturity || ' days')::INTERVAL)::DATE as projected_harvest_date,
+        (pl.area_sqm * 
+            (SELECT COALESCE(AVG(h.quantity_kg/pl2.area_sqm), 0)
+             FROM plantings pl2 
+             JOIN harvests h ON pl2.planting_id = h.planting_id
+             WHERE pl2.plant_id = p.id
+             AND pl2.planting_date >= (CURRENT_DATE - INTERVAL '1 year'))
+        ) as estimated_yield_kg,
+        plt.plot_code,
+        COALESCE(
+            (SELECT go.plant_health || ' - ' || go.notes
+             FROM growing_observations go
+             WHERE go.planting_id = pl.planting_id
+             ORDER BY go.observation_date DESC
+             LIMIT 1),
+            'No recent observations'
+        ) as current_status
+    FROM plantings pl
+    JOIN plants p ON pl.plant_id = p.id
+    JOIN plant_properties pp ON p.id = pp.plant_id
+    JOIN plots plt ON pl.plot_id = plt.plot_id
+    WHERE (pl.planting_date + (pp.days_to_maturity || ' days')::INTERVAL)::DATE 
+        BETWEEN start_date AND end_date;
+END;
+$$ LANGUAGE plpgsql;
